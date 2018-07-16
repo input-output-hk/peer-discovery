@@ -4,6 +4,8 @@ module Network.PeerDiscovery.Util
   , deserialiseOrFail'
   , encodePublicKey
   , decodePublicKey
+  , encodeSecretKey
+  , decodeSecretKey
   , encodeSignature
   , decodeSignature
   , encodePortNumber
@@ -50,6 +52,14 @@ encodePublicKey = encode . (BA.convert :: C.PublicKey -> BS.ByteString)
 decodePublicKey :: String -> Decoder s C.PublicKey
 decodePublicKey label = decodeBytes <&> C.publicKey >>= \case
   C.CryptoFailed err  -> fail $ label ++ ": decodePublicKey: " ++ show err
+  C.CryptoPassed pkey -> pure pkey
+
+encodeSecretKey :: C.SecretKey -> Encoding
+encodeSecretKey = encode . (BA.convert :: C.SecretKey -> BS.ByteString)
+
+decodeSecretKey :: String -> Decoder s C.SecretKey
+decodeSecretKey label = decodeBytes <&> C.secretKey >>= \case
+  C.CryptoFailed err  -> fail $ label ++ ": decodeSecretKey: " ++ show err
   C.CryptoPassed pkey -> pure pkey
 
 encodeSignature :: C.Signature -> Encoding

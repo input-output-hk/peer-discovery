@@ -31,36 +31,38 @@ bootstrap
   :: PeerDiscovery cm
   -> Node -- ^ Initial peer
   -> IO Bool
-bootstrap pd node = join . atomically $ readTVar (pdBootstrapState pd) >>= \case
-  BootstrapInProgress -> retry
-  bootstrapState      -> do
-    writeTVar (pdBootstrapState pd) BootstrapInProgress
-    return . (`onException` result bootstrapState) $ do
-      sendRequestSync pd (Ping Nothing) node (result bootstrapState) $ \Pong -> do
-        readMVar (pdPublicPort pd) >>= \case
-          Nothing   -> return ()
-          Just port -> do
-            -- Check if we're globally reachable on the specified port.
-            reachable <- sendRequestSync pd (Ping $ Just port) node
-              (return False)
-              (\Pong -> return True)
-            -- If we're not, erase the port so we don't pretend in future
-            -- communication that we are.
-            when (not reachable) $ do
-              putStrLn $ "bootstrap: we are not globally reachable on " ++ show port
-              modifyMVarP_ (pdPublicPort pd) (const Nothing)
-        -- We successfully contacted (and thus authenticated) the initial peer, so
-        -- it's safe to insert him into the routing table.
-        modifyMVarP_ (pdRoutingTable pd) $ unsafeInsertPeer (pdConfig pd) node
-        myId <- withMVarP (pdRoutingTable pd) rtId
-        -- Populate our neighbourhood.
-        void $ peerLookup pd myId
-        fix $ \loop -> do
-          targetId <- randomPeerId
-          -- Populate part of the routing table holding nodes far from us.
-          if testPeerIdBit myId 0 /= testPeerIdBit targetId 0
-            then peerLookup pd targetId >> result BootstrapDone
-            else loop
+bootstrap pd node = do
+  bootstrapState <- atomically $ readTVar (pdBootstrapState pd) >>= \case
+    BootstrapInProgress -> retry
+    bs -> do
+      writeTVar (pdBootstrapState pd) BootstrapInProgress
+      return bs
+  (`onException` result bootstrapState) $ do
+    sendRequestSync pd (Ping Nothing) node (result bootstrapState) $ \Pong -> do
+      readMVar (pdPublicPort pd) >>= \case
+        Nothing   -> return ()
+        Just port -> do
+          -- Check if we're globally reachable on the specified port.
+          reachable <- sendRequestSync pd (Ping $ Just port) node
+            (return False)
+            (\Pong -> return True)
+          -- If we're not, erase the port so we don't pretend in future
+          -- communication that we are.
+          when (not reachable) $ do
+            putStrLn $ "bootstrap: we are not globally reachable on " ++ show port
+            modifyMVarP_ (pdPublicPort pd) (const Nothing)
+      -- We successfully contacted (and thus authenticated) the initial peer, so
+      -- it's safe to insert him into the routing table.
+      modifyMVarP_ (pdRoutingTable pd) $ unsafeInsertPeer (pdConfig pd) node
+      myId <- withMVarP (pdRoutingTable pd) rtId
+      -- Populate our neighbourhood.
+      void $ peerLookup pd myId
+      fix $ \loop -> do
+        targetId <- randomPeerId
+        -- Populate part of the routing table holding nodes far from us.
+        if testPeerIdBit myId 0 /= testPeerIdBit targetId 0
+          then peerLookup pd targetId >> result BootstrapDone
+          else loop
   where
     result st = do
       atomically $ writeTVar (pdBootstrapState pd) BootstrapNeeded
