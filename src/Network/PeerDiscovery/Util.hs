@@ -13,6 +13,8 @@ module Network.PeerDiscovery.Util
   , withMVarP
   , modifyMVarP
   , modifyMVarP_
+  , modifyTVarP
+  , modifyTVarP_
   -- * Misc
   , randomPartition
   , mkInteger
@@ -35,6 +37,8 @@ import qualified Data.ByteArray as BA
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Map.Strict as M
+import Control.Monad.STM
+import Control.Concurrent.STM.TVar
 
 -- | Strict version of 'serialise'.
 serialise' :: Serialise a => a -> BS.ByteString
@@ -91,6 +95,20 @@ modifyMVarP mv f = modifyMVar mv $ \v -> do
 -- | Strictly apply a pure function to contents of MVar.
 modifyMVarP_ :: MVar a -> (a -> a) -> IO ()
 modifyMVarP_ mv f = modifyMVar_ mv $ \v -> return $! f v
+
+-- | Strictly apply a pure function to the contents of a 'TVar'
+-- and return a result.
+modifyTVarP :: TVar a -> (a -> (a, r)) -> STM r
+modifyTVarP tv f = do
+  old <- readTVar tv
+  case f old of
+    (!new, res) -> res <$ writeTVar tv new
+
+-- | Strictly apply a pure function to the contents of a 'TVar'.
+modifyTVarP_ :: TVar a -> (a -> a) -> STM ()
+modifyTVarP_ tv f = do
+  old <- readTVar tv
+  writeTVar tv $! f old
 
 ----------------------------------------
 

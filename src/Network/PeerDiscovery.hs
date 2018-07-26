@@ -34,7 +34,7 @@ withPeerDiscovery
   -> IO r
 withPeerDiscovery pdConfig joinNetwork mskey commMethod port k = do
   pdBootstrapState   <- newTVarIO BootstrapNeeded
-  pdPublicPort       <- newMVar $ if joinNetwork then Just port else Nothing
+  pdPublicPort       <- newTVarIO $ if joinNetwork then Just port else Nothing
   pdSecretKey        <- maybe C.generateSecretKey pure mskey
   let pdPublicKey    = C.toPublic pdSecretKey
   pdRoutingTable     <- newMVar . initRoutingTable $ mkPeerId pdPublicKey

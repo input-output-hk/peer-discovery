@@ -389,7 +389,7 @@ data BootstrapState = BootstrapNeeded | BootstrapInProgress | BootstrapDone
 data PeerDiscovery cm = PeerDiscovery
   { pdBindAddr         :: !Peer
   , pdBootstrapState   :: !(TVar BootstrapState)
-  , pdPublicPort       :: !(MVar (Maybe PortNumber))
+  , pdPublicPort       :: !(TVar (Maybe PortNumber))
   , pdPublicKey        :: !C.PublicKey
   , pdSecretKey        :: !C.SecretKey
   , pdCommInterface    :: !CommInterface

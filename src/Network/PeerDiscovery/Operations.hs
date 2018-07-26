@@ -26,45 +26,115 @@ import Network.PeerDiscovery.Routing
 import Network.PeerDiscovery.Types
 import Network.PeerDiscovery.Util
 
--- | Bootstrap the instance with initial peer.
+-- | Bootstrap the instance with initial peer. Returns 'True'
+-- if bootstrapping was successful.
 bootstrap
   :: PeerDiscovery cm
   -> Node -- ^ Initial peer
   -> IO Bool
-bootstrap pd node = join . atomically $ readTVar (pdBootstrapState pd) >>= \case
-  BootstrapInProgress -> retry
-  bootstrapState      -> do
-    writeTVar (pdBootstrapState pd) BootstrapInProgress
-    return . (`onException` result bootstrapState) $ do
-      sendRequestSync pd (Ping Nothing) node (result bootstrapState) $ \Pong -> do
-        readMVar (pdPublicPort pd) >>= \case
-          Nothing   -> return ()
-          Just port -> do
-            -- Check if we're globally reachable on the specified port.
-            reachable <- sendRequestSync pd (Ping $ Just port) node
-              (return False)
-              (\Pong -> return True)
-            -- If we're not, erase the port so we don't pretend in future
-            -- communication that we are.
-            when (not reachable) $ do
-              putStrLn $ "bootstrap: we are not globally reachable on " ++ show port
-              modifyMVarP_ (pdPublicPort pd) (const Nothing)
-        -- We successfully contacted (and thus authenticated) the initial peer, so
-        -- it's safe to insert him into the routing table.
-        modifyMVarP_ (pdRoutingTable pd) $ unsafeInsertPeer (pdConfig pd) node
-        myId <- withMVarP (pdRoutingTable pd) rtId
-        -- Populate our neighbourhood.
-        void $ peerLookup pd myId
-        fix $ \loop -> do
-          targetId <- randomPeerId
-          -- Populate part of the routing table holding nodes far from us.
-          if testPeerIdBit myId 0 /= testPeerIdBit targetId 0
-            then peerLookup pd targetId >> result BootstrapDone
-            else loop
+bootstrap pd node = do
+  -- Why do we have this transaction and then one in bootstrapUnlessDone?
+  -- We have two requirements:
+  --
+  -- 1. If bootstrapping was previously done and we're now re-bootstrapping,
+  -- we actually want to bootstrap.
+  --
+  -- 2. However, if bootstrapping is currently *in progress*, we just want
+  -- to wait for it to succeed.
+  --
+  -- We originally used just one transaction:
+  --
+  -- atomically $ readTVar (pdBootstrapState pd) >>= \case
+  --   BootstrapInProgress -> retry
+  --   bs -> do
+  --      writeTVar (pdBootstrapState pd) BootstrapInProgress
+  --      return ...
+  --
+  -- This accomplishes (1), but not (2). If bootstrapping is already in
+  -- progress, the single transaction would indeed wait for it to complete,
+  -- but then repeat it whether it succeeded or not.
+  atomically $ readTVar (pdBootstrapState pd) >>= \case
+    BootstrapDone -> writeTVar (pdBootstrapState pd) BootstrapNeeded
+    _ -> pure ()
+  bootstrapUnlessDone pd node
+
+-- | Bootstrap the instance with initial peer, unless we are already
+-- bootstrapped. Returns 'True' if bootstrapping was successful or we
+-- were already bootstrapped.
+bootstrapUnlessDone
+  :: PeerDiscovery cm
+  -> Node -- ^ Initial peer
+  -> IO Bool
+bootstrapUnlessDone pd node =
+  -- If we receive an exception after setting BootstrapInProgress, we need
+  -- to be sure to set it back to BootstrapNeeded to unblock any other threads
+  -- that are attempting to bootstrap.
+  (`onException` resetBootstrap) $ do
+  bootstrap_still_needed <- atomically $ readTVar (pdBootstrapState pd) >>= \case
+    -- If bootstrapping is already in progress, let it proceed.
+    BootstrapInProgress -> retry
+    -- We are already bootstrapped, so we don't need to do anything.
+    BootstrapDone -> pure False
+    -- The job is ours: bootstrap.
+    BootstrapNeeded -> True <$ writeTVar (pdBootstrapState pd) BootstrapInProgress
+  if not bootstrap_still_needed
+  then return True
+  else do
+    -- Filled with True if the initial ping succeeds; filled with
+    -- False otherwise.
+    initialPingMV <- newEmptyMVar
+
+    -- We do this asynchronously: there's no need to wait for a response
+    -- to the initial ping before sending the one that checks for global
+    -- reachability.
+    sendRequest pd (Ping Nothing) node
+      -- Failed to ping the initial peer. Reset the
+      -- bootstrap state and report failure.
+      (putMVar initialPingMV False) $
+      -- Successfully pinged the initial peer.
+      \Pong -> do
+      -- We successfully contacted (and thus authenticated) the initial peer, so
+      -- it's safe to insert him into the routing table.
+      modifyMVarP_ (pdRoutingTable pd) $ unsafeInsertPeer (pdConfig pd) node
+      myId <- withMVarP (pdRoutingTable pd) rtId
+      -- Populate our neighbourhood.
+      void $ peerLookup pd myId
+      fix $ \loop -> do
+        targetId <- randomPeerId
+        -- Populate part of the routing table holding nodes far from us.
+        if testPeerIdBit myId 0 /= testPeerIdBit targetId 0
+          then do
+                 _ <- peerLookup pd targetId
+                 return ()
+          else loop
+      putMVar initialPingMV True
+
+    atomically (readTVar (pdPublicPort pd)) >>= \case
+        Nothing   -> return ()
+        Just port -> do
+          -- Check if we're globally reachable on the specified port.
+          reachable <- sendRequestSync pd (Ping $ Just port) node
+            (return False)
+            (\Pong -> return True)
+          -- If we're not, erase the port so we don't pretend in future
+          -- communication that we are.
+          when (not reachable) $ do
+            putStrLn $ "bootstrap: we are not globally reachable on " ++ show port
+            atomically $ modifyTVarP_ (pdPublicPort pd) (const Nothing)
+
+    -- In principle, I believe we could cancel the initial ping if the
+    -- global reachability test succeeds. But we don't currently have
+    -- the ability to cancel requests, and I don't know if it's worth the
+    -- trouble.
+    initial_ping_succeeded <- readMVar initialPingMV
+    if not initial_ping_succeeded
+    then resetBootstrap >> return False
+    else do
+      atomically $ writeTVar (pdBootstrapState pd) BootstrapDone
+      return True
   where
-    result st = do
+    resetBootstrap =
       atomically $ writeTVar (pdBootstrapState pd) BootstrapNeeded
-      return $ st == BootstrapDone
 
 ----------------------------------------
 
@@ -152,7 +222,7 @@ peerLookup pd@PeerDiscovery{..} targetId = do
       -> [(Distance, Node)]
       -> IO ()
     sendFindNodeRequests queue peers = do
-      publicPort <- readMVar pdPublicPort
+      publicPort <- atomically $ readTVar pdPublicPort
       myId <- withMVarP pdRoutingTable rtId
       let findNode = FindNode { fnPeerId = myId
                               , fnPublicPort = publicPort
@@ -331,7 +401,7 @@ performRoutingTableMaintenance :: PeerDiscovery cm -> IO ()
 performRoutingTableMaintenance pd@PeerDiscovery{..} = do
   findNode <- do
     myId <- withMVarP pdRoutingTable rtId
-    port <- readMVar pdPublicPort
+    port <- atomically $ readTVar pdPublicPort
     return $ \nid -> FindNode { fnPeerId     = myId
                               , fnPublicPort = port
                               , fnTargetId   = nid
