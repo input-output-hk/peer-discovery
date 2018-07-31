@@ -15,14 +15,14 @@ import Network.PeerDiscovery.Types
 refresher :: PeerDiscovery cm -> IO r
 refresher pd@PeerDiscovery{..} = forever $ do
   threadDelay $ (5 * minute) `quot` configSpeedupFactor pdConfig
-  join . atomically $ readTVar pdBootstrapState >>= \case
+  atomically $ readTVar pdBootstrapState >>= \case
     BootstrapNeeded     -> retry
     BootstrapInProgress -> retry
-    BootstrapDone       -> return $ do
-      -- Before we do routing table maintenance, perform random peer lookup in
-      -- order to refresh the routing table a bit.
-      void $ peerLookup pd =<< randomPeerId
-      performRoutingTableMaintenance pd
+    BootstrapDone       -> pure ()
+  -- Before we do routing table maintenance, perform random peer lookup in
+  -- order to refresh the routing table a bit.
+  void $ peerLookup pd =<< randomPeerId
+  performRoutingTableMaintenance pd
   where
     minute = 60 * 1000000
 
